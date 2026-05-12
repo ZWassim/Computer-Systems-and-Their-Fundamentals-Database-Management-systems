@@ -1,0 +1,216 @@
+================================================================================
+PART 1 - TRANSACTION MANAGEMENT (CONCEPTUAL)
+================================================================================
+
+Scenario: Mini banking system where users can transfer money between accounts
+and view balances. Two users simultaneously initiate transfers involving the
+same account.
+
+-------------------------------------------------------------------------------
+1.1 CONCURRENCY ISSUE IDENTIFIED
+-------------------------------------------------------------------------------
+Issue: LOST UPDATE PROBLEM
+
+When two transactions simultaneously update the same account without control,
+the second transaction may overwrite the changes of the first.
+
+Example:
+- Initial account balance = $1000
+- Transaction A: Transfer $200 out → new balance = $800
+- Transaction B: Transfer $100 out → new balance = $900 (reads $1000, not $800)
+- Final balance = $900 instead of $700 → $200 is LOST
+
+Why not Dirty Read?
+Dirty read is less likely here because both transfers are based on committed
+initial data, not uncommitted data. The primary problem is overwriting
+committed updates.
+
+-------------------------------------------------------------------------------
+1.2 SIMPLE LOCKING MECHANISM
+-------------------------------------------------------------------------------
+Solution: EXCLUSIVE LOCKS (Write Locks) on the account row.
+
+Protocol:
+- Before reading an account balance for update, a transaction must acquire an
+  exclusive lock on that account.
+- No other transaction can read or write that account until the lock is released.
+- After the update is written and committed, the lock is released.
+
+Example flow:
+Transaction A: LOCK-X(Account123); read balance; update; write; UNLOCK
+Transaction B: (waits if Account123 locked) ... then proceeds
+
+-------------------------------------------------------------------------------
+1.3 PESSIMISTIC VS. OPTIMISTIC LOCKING
+-------------------------------------------------------------------------------
+Choice: PESSIMISTIC LOCKING
+
+Reasons for this choice:
+1. Banking transfers involve HIGH CONTENTION on certain accounts
+   (e.g., popular accounts, main branch accounts).
+2. Conflicts are LIKELY, not rare.
+3. Pessimistic locking prevents conflicts upfront rather than detecting and
+   retrying after the fact.
+4. CONSISTENCY is critical over performance in banking systems.
+5. Optimistic locking would cause frequent rollbacks and retries in this
+   scenario, which is unacceptable for user experience.
+
+-------------------------------------------------------------------------------
+1.4 SCHEDULE TABLE (SAFE / UNSAFE)
+-------------------------------------------------------------------------------
+Scenario: Account balance starts at $1000.
+- Transfer A: -$200
+- Transfer B: -$100
+Using EXCLUSIVE LOCKING (Pessimistic) - only one transaction holds the lock at a time.
+
++------+----------------------+----------------------+-----------------------+-------------+
+| Time | Transaction A (T1)   | Transaction B (T2)   | Lock State (Account)  | Balance     |
++------+----------------------+----------------------+-----------------------+-------------+
+| t1   | LOCK-X (Acct)        |                      | X-lock by T1          | 1000        |
+| t2   | Read balance (1000)  |                      | X-lock by T1          | 1000        |
+| t3   | Compute new (800)    |                      | X-lock by T1          | 1000        |
+| t4   | Write (800)          |                      | X-lock by T1          | 800         |
+| t5   | UNLOCK               |                      | Unlocked              | 800         |
+| t6   |                      | LOCK-X (Acct)        | X-lock by T2          | 800         |
+| t7   |                      | Read balance (800)   | X-lock by T2          | 800         |
+| t8   |                      | Compute new (700)    | X-lock by T2          | 800         |
+| t9   |                      | Write (700)          | X-lock by T2          | 700         |
+| t10  |                      | UNLOCK               | Unlocked              | 700         |
++------+----------------------+----------------------+-----------------------+-------------+
+
+VERDICT: Schedule is SAFE
+- This is conflict-serializable.
+- Equivalent to executing T1 then T2 serially.
+- No lost update occurs.
+- Final balance is correct ($700).
+
+================================================================================
+PART 2 - DISTRIBUTED DATABASE PLANNING
+================================================================================
+
+Scenario: Bank has three branches: Tunis, Sousse, and Sfax.
+
+-------------------------------------------------------------------------------
+2.1 HORIZONTAL FRAGMENTATION STRATEGY
+-------------------------------------------------------------------------------
+Strategy: Fragment the Customers table by BRANCH LOCATION.
+
+Fragments created:
+- Customers_Tunis   : WHERE branch = 'Tunis'
+- Customers_Sousse  : WHERE branch = 'Sousse'
+- Customers_Sfax    : WHERE branch = 'Sfax'
+
+Rationale:
+- Each branch primarily accesses its own customers.
+- Reduces network traffic significantly.
+- Simple, location-based partitioning.
+- Allows parallel query processing.
+- Facilitates local autonomy for each branch.
+
+Example Schema:
+
+CREATE TABLE Customers (
+    customer_id INT PRIMARY KEY,
+    name VARCHAR(100),
+    branch VARCHAR(20),   -- 'Tunis', 'Sousse', 'Sfax'
+    address TEXT,
+    phone VARCHAR(20)
+);
+
+-- Horizontal fragments:
+CREATE VIEW Customers_Tunis AS
+    SELECT * FROM Customers WHERE branch = 'Tunis';
+
+CREATE VIEW Customers_Sousse AS
+    SELECT * FROM Customers WHERE branch = 'Sousse';
+
+CREATE VIEW Customers_Sfax AS
+    SELECT * FROM Customers WHERE branch = 'Sfax';
+
+-------------------------------------------------------------------------------
+2.2 VERTICAL FRAGMENTATION COLUMN SUGGESTION
+-------------------------------------------------------------------------------
+Suggested column for vertical separation: EMAIL or LOGIN_PASSWORD_HASH
+
+Reason: Authentication and login information should be separated from core
+customer profile data for security and performance.
+
+Vertical Fragment (separate table):
+
+CREATE TABLE CustomerAuth (
+    customer_id INT PRIMARY KEY,
+    email VARCHAR(100) UNIQUE,
+    password_hash VARCHAR(255),   -- store hash, not plain text
+    last_login TIMESTAMP,
+    login_attempts INT DEFAULT 0,
+    FOREIGN KEY (customer_id) REFERENCES Customers(customer_id)
+);
+
+Advantages of this vertical fragmentation:
+1. SECURITY: Sensitive authentication data can be stored encrypted and
+   accessed only by the authentication module.
+2. PERFORMANCE: General customer queries (name, address) don't load heavy
+   or sensitive columns.
+3. ACCESS CONTROL: Different permissions can be set on the auth table.
+4. STORAGE OPTIMIZATION: Can place auth table on more secure (possibly slower)
+   storage without affecting main customer queries.
+
+-------------------------------------------------------------------------------
+2.3 DATA TO REPLICATE ACROSS ALL BRANCHES
+-------------------------------------------------------------------------------
+Recommendation: Replicate CUSTOMER IDENTIFIERS + BRANCH MAPPING
+(but NOT balances or full history)
+
+Detailed answer:
+
+| Data Type                    | Replicate? | Reason                                                                 |
+|------------------------------|------------|-------------------------------------------------------------------------|
+| Customer ID + Name           | YES        | Needed to identify customers from any branch                           |
+| Branch location of customer  | YES        | To route transactions to the correct home branch                       |
+| Account numbers              | YES        | For cross-branch transfers and lookups                                 |
+| Account balances             | NO         | Single source of truth; updates must occur in one place                |
+| Full transaction history     | NO         | Too large; can be retrieved from home branch when needed               |
+| Recent transaction history   | PARTIAL    | Recent 30 days could be cached but not authoritative                   |
+
+Best practice for your question:
+Replicate customer_id, customer_name, and home_branch. Do NOT replicate
+account balances or full transaction history to avoid update anomalies and
+replication lag issues.
+
+Why not replicate balances?
+- If two branches update the same balance simultaneously, conflicts occur.
+- Replication lag could show stale balances.
+- Banking requires strong consistency, not eventual consistency.
+
+-------------------------------------------------------------------------------
+2.4 STATIC VS. DYNAMIC ALLOCATION FOR TRANSACTION HISTORY
+-------------------------------------------------------------------------------
+Choice: DYNAMIC ALLOCATION
+
+Justification:
+
+1. GROWTH: Transaction history grows continuously over time.
+   - Static allocation would lead to storage exhaustion or frequent manual
+     reorganization.
+   - Dynamic allocation allows automatic expansion.
+
+2. ACCESS PATTERNS: Recent transactions are accessed far more often than old ones.
+   - Dynamic allocation can keep recent history on fast storage (SSD, local node)
+   - Older history can be moved to cheaper, slower archival storage.
+
+3. LOAD BALANCING: Dynamic allocation can distribute new transaction records
+   across nodes based on current load.
+
+4. MAINTENANCE: Dynamic allocation supports automated partitioning and
+   archival without service interruption.
+
+Example dynamic strategy:
+- Recent transactions (last 30 days): Stored locally at the branch where they
+  occurred, on high-performance storage.
+- Older transactions (31-365 days): Moved to a central or cloud database.
+- Archival transactions (>1 year): Moved to cold storage (e.g., AWS Glacier).
+
+Static allocation would fail because:
+- Transaction volume is unpredictable.
+- Hot spots would develop on certain branches.
+- Storage rebalancing would require manual intervention.
