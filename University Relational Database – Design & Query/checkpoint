@@ -1,0 +1,189 @@
+
+-- STEP 1 - SCHEMA DESIGN (Relational Schema with Normalization up to 3NF)
+
+/*
+Normalization Analysis:
+
+1NF (First Normal Form):
+- All attributes contain atomic values (no repeating groups or arrays).
+- Each table has a primary key.
+
+2NF (Second Normal Form):
+- All non-key attributes fully depend on the entire primary key.
+- Enrollments table: student_id and course_id together determine grade.
+- No partial dependencies.
+
+3NF (Third Normal Form):
+- No transitive dependencies (non-key attributes depend only on the primary key).
+- In Students: name, email, age depend only on student_id (no transitive dependency).
+- In Courses: title, credits, instructor_id depend only on course_id.
+- In Instructors: name, department depend only on instructor_id.
+
+Final Schema (3NF compliant):
+---------------------
+Students (student_id, name, email, age)
+Courses (course_id, title, credits, instructor_id)
+Instructors (instructor_id, name, department)
+Enrollments (student_id, course_id, grade)
+
+Constraints:
+- Primary keys: student_id, course_id, instructor_id, (student_id, course_id) composite
+- Foreign keys: Enrollments references Students and Courses; Courses references Instructors
+- CHECK: age > 17, credits >= 0, credits <= 12, grade IN ('A','B','C','D','F',...)
+- NOT NULL: all key fields and required fields
+- UNIQUE: email
+*/
+
+-- STEP 2 - SQL TABLE CREATION
+
+-- Drop tables if they exist (for clean re-run)
+DROP TABLE IF EXISTS Enrollments;
+DROP TABLE IF EXISTS Courses;
+DROP TABLE IF EXISTS Instructors;
+DROP TABLE IF EXISTS Students;
+
+-- Create Instructors table (referenced by Courses)
+CREATE TABLE Instructors (
+    instructor_id INT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    department VARCHAR(100) NOT NULL,
+    email VARCHAR(100) UNIQUE,
+    CONSTRAINT chk_instructor_name CHECK (LENGTH(TRIM(name)) > 0)
+);
+
+-- Create Students table
+CREATE TABLE Students (
+    student_id INT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(100) NOT NULL UNIQUE,
+    age INT NOT NULL,
+    CONSTRAINT chk_student_age CHECK (age > 17),
+    CONSTRAINT chk_student_name CHECK (LENGTH(TRIM(name)) > 0)
+);
+
+-- Create Courses table (references Instructors)
+CREATE TABLE Courses (
+    course_id INT PRIMARY KEY,
+    title VARCHAR(200) NOT NULL,
+    credits INT NOT NULL,
+    instructor_id INT NOT NULL,
+    CONSTRAINT chk_credits CHECK (credits >= 0 AND credits <= 12),
+    FOREIGN KEY (instructor_id) REFERENCES Instructors(instructor_id)
+        ON DELETE RESTRICT ON UPDATE CASCADE
+);
+
+-- Create Enrollments table (junction table between Students and Courses)
+CREATE TABLE Enrollments (
+    student_id INT NOT NULL,
+    course_id INT NOT NULL,
+    grade CHAR(2),
+    enrollment_date DATE DEFAULT CURRENT_DATE,
+    PRIMARY KEY (student_id, course_id),
+    FOREIGN KEY (student_id) REFERENCES Students(student_id)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    FOREIGN KEY (course_id) REFERENCES Courses(course_id)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT chk_grade CHECK (grade IN ('A', 'A-', 'B+', 'B', 'B-', 'C+', 'C', 'C-', 'D', 'F', 'P', 'NP', NULL))
+);
+
+-- STEP 3 - INSERT SAMPLE DATA
+
+-- Insert 3 Instructors
+INSERT INTO Instructors (instructor_id, name, department, email) VALUES
+(1, 'Dr. Ahmed Ben Ali', 'Computer Science', 'ahmed.benali@university.tn'),
+(2, 'Prof. Samira Mansouri', 'Mathematics', 'samira.mansouri@university.tn'),
+(3, 'Dr. Karim Jaziri', 'Information Systems', 'karim.jaziri@university.tn');
+
+-- Insert 3 Students
+INSERT INTO Students (student_id, name, email, age) VALUES
+(101, 'Ali Ben Salah', 'ali.bensalah@student.tn', 20),
+(102, 'Sarra Khmiri', 'sarra.khmiri@student.tn', 22),
+(103, 'Mohamed Amine Khelil', 'amine.khelil@student.tn', 19);
+
+-- Insert 3 Courses (each linked to an instructor)
+INSERT INTO Courses (course_id, title, credits, instructor_id) VALUES
+(201, 'Database Systems', 4, 1),     -- taught by Dr. Ahmed Ben Ali
+(202, 'Discrete Mathematics', 3, 2), -- taught by Prof. Samira Mansouri
+(203, 'Data Structures', 4, 3);      -- taught by Dr. Karim Jaziri
+
+-- Insert 4 Enrollment Records
+INSERT INTO Enrollments (student_id, course_id, grade, enrollment_date) VALUES
+(101, 201, 'A', '2024-09-15'),   -- Ali in Database Systems
+(102, 201, 'B+', '2024-09-15'),  -- Sarra in Database Systems
+(101, 203, 'B', '2024-09-16'),   -- Ali in Data Structures
+(103, 202, 'C+', '2024-09-14');  -- Mohamed in Discrete Mathematics
+
+-- STEP 4 - QUERY EXECUTION
+
+-- QUERY 1: Retrieve all students enrolled in the course "Database Systems"
+SELECT '=== QUERY 1: Students enrolled in Database Systems ===' AS '';
+
+SELECT s.student_id, s.name, s.email, e.grade
+FROM Students s
+JOIN Enrollments e ON s.student_id = e.student_id
+JOIN Courses c ON e.course_id = c.course_id
+WHERE c.title = 'Database Systems';
+
+
+-- QUERY 2: List all courses along with the names of their instructors
+SELECT '=== QUERY 2: All courses and their instructors ===' AS '';
+
+SELECT c.course_id, c.title, c.credits, i.name AS instructor_name, i.department
+FROM Courses c
+JOIN Instructors i ON c.instructor_id = i.instructor_id
+ORDER BY c.course_id;
+
+-- QUERY 3: Find students who are not enrolled in any course
+SELECT '=== QUERY 3: Students with no enrollments ===' AS '';
+
+SELECT s.student_id, s.name, s.email, s.age
+FROM Students s
+LEFT JOIN Enrollments e ON s.student_id = e.student_id
+WHERE e.student_id IS NULL;
+
+
+
+-- Insert a student with no enrollment for demonstration
+INSERT IGNORE INTO Students (student_id, name, email, age) VALUES
+(104, 'Nour El Houda Ben Slimane', 'nour.benslimane@student.tn', 21);
+
+-- Re-run query 3 after inserting unenrolled student
+SELECT '=== QUERY 3 (after adding unenrolled student) ===' AS '';
+SELECT s.student_id, s.name, s.email, s.age
+FROM Students s
+LEFT JOIN Enrollments e ON s.student_id = e.student_id
+WHERE e.student_id IS NULL;
+
+-- QUERY 4: Update the email address of a student
+SELECT '=== QUERY 4: Before email update (Student 101) ===' AS '';
+SELECT student_id, name, email FROM Students WHERE student_id = 101;
+
+-- Perform update
+UPDATE Students
+SET email = 'ali.bensalah.new@student.tn'
+WHERE student_id = 101;
+
+SELECT '=== After email update (Student 101) ===' AS '';
+SELECT student_id, name, email FROM Students WHERE student_id = 101;
+
+-- QUERY 5: Delete a course by its ID
+-- Note: Due to ON DELETE CASCADE on Enrollments, deleting a course will
+-- automatically delete its enrollment records.
+-- Also, ON DELETE RESTRICT on Courses -> Instructors prevents deleting an
+-- instructor who teaches courses (safety).
+
+SELECT '=== Before course deletion: Courses list ===' AS '';
+SELECT * FROM Courses;
+
+SELECT '=== Before course deletion: Enrollments in course 203 ===' AS '';
+SELECT * FROM Enrollments WHERE course_id = 203;
+
+-- Delete course with ID = 203 (Data Structures)
+DELETE FROM Courses WHERE course_id = 203;
+
+SELECT '=== After course deletion: Courses list ===' AS '';
+SELECT * FROM Courses;
+
+SELECT '=== After course deletion: Enrollments (none for course 203) ===' AS '';
+SELECT * FROM Enrollments;
+
